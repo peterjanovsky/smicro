@@ -1,5 +1,17 @@
 *.class
 *.log
+*.swp
+
+# OS Files
+.DS_Store
+
+# Maven Build Directory
+target
+
+# Idea IDE
+.idea
+*.iml
+*.launch
 
 # sbt specific
 .cache
@@ -15,3 +27,6 @@ project/plugins/project/
 # Scala-IDE specific
 .scala_dependencies
 .worksheet
+
+# App logs directory
+log/
