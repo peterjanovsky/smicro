@@ -1,103 +1,37 @@
 package com.pjanof.benchmarking
 
+import scala.concurrent.{Await, ExecutionContext, Future}
+import scala.concurrent.duration.Duration
+import scala.math._
+
 /* microbenchmarking
  *
  * measures in nano seconds
  * requires manual JVM warmup through execution of prior run
  *
 */
-trait Enum[A] {
-  trait Value { self: A => }
-  val values: List[A]
-}
-
-sealed trait RunType extends RunType.Value
-object RunType extends Enum[RunType] {
-  case object Parallel extends RunType
-  case object Sequential extends RunType
-  val values = List(Parallel, Sequential)
-}
-
-trait MicroTime {
-  def start: Long
-  def stop: Long
-}
-
-case class MicroResult[T](
-  result: T,
-  start: Long,
-  stop: Long
-) extends MicroTime
-
-case class Bucket[T](
-  results: IndexedSeq[MicroResult[T]],
-  start: Long,
-  stop: Long
-) extends MicroTime
-
-case class MicroStatistics(
-  objName: String,
-  runType: RunType,
-  repetitions: Int,
-  totalTime: Long,
-  avgTime: Long,
-  tps: Long,
-  min: Long,
-  max: Long,
-  mean: Long,
-  median: Long,
-  deviation: Double
-) {
-  def printMicro =
-    printf(
-      "Name: %s\tRepeat: %d\tTotal: %,d μs \tAvg: %,d μs \tTPS: %d\tMin: %,d μs \tMax: %,d μs \tMean: %,d μs \tMedian: %,d μs \tSTD: %f\n",
-      objName,
-      repetitions,
-      totalTime/1000,
-      avgTime/1000,
-      tps,
-      min/1000,
-      max/1000,
-      mean/1000,
-      median/1000,
-      deviation/1000
-    )
-  def printMillis =
-    printf(
-      "Name: %s\tRepeat: %d\tTotal: %,d ms\tAvg: %,d ms\tTPS: %d\tMin: %,d ms\tMax: %,d ms\tMean: %,d ms\tMedian: %,d ms\tSTD: %f\n",
-      objName,
-      repetitions,
-      totalTime/1000000,
-      avgTime/1000000,
-      tps,
-      min/1000000,
-      max/1000000,
-      mean/1000000,
-      median/1000000,
-      deviation/1000000
-    )
-}
-
 private object MicroCore {
 
-  def execute[A](x: => A): MicroResult[A] = {
+  def execute[A](f: Future[A])(implicit ec: ExecutionContext): MicroResult[A] = {
     val start: Long = System.nanoTime
-    val res = x
+    val res = Await.result(f, Duration.Inf)
     val stop: Long = System.nanoTime
 
     MicroResult(res, start, stop)
   }
 
-  def sort[A](x: IndexedSeq[MicroResult[A]]): IndexedSeq[MicroResult[A]] =  x.sortWith( (f, s) => (f.stop - f.start) < (s.stop - s.start) )
+  def sort[A](xs: IndexedSeq[MicroResult[A]]): IndexedSeq[MicroResult[A]] =
+    xs.sortWith( (f, s) => (f.stop - f.start) < (s.stop - s.start) )
 
-  private def diffCalc[A](x: IndexedSeq[MicroResult[A]]): Long = x.foldLeft( 0L ){ (acc, y) => acc + (y.stop - y.start) }
-  def min[A](x: IndexedSeq[MicroResult[A]]): Long = diffCalc( sort(x).take(1) )
-  def max[A](x: IndexedSeq[MicroResult[A]]): Long = diffCalc( sort(x).takeRight(1) )
+  private def diffCalc[A](xs: IndexedSeq[MicroResult[A]]): Long =
+    xs.foldLeft( 0L ){ (acc, y) => acc + (y.stop - y.start) }
 
-  def mean[A](x: IndexedSeq[MicroResult[A]]): Long = diffCalc( x ) / x.length
+  def min[A](xs: IndexedSeq[MicroResult[A]]): Long = diffCalc( sort(xs).take(1) )
+  def max[A](xs: IndexedSeq[MicroResult[A]]): Long = diffCalc( sort(xs).takeRight(1) )
+  def mean[A](xs: IndexedSeq[MicroResult[A]]): Long = diffCalc( xs ) / xs.length
  
-  def median[A](x: IndexedSeq[MicroResult[A]]): Long = {
-    val o = sort(x)
+  def median[A](xs: IndexedSeq[MicroResult[A]]): Long = {
+    val o = sort(xs)
     val (l, n) = o.splitAt( o.length / 2 )
     o.length % 2 match {
       case 0 => mean( l.takeRight(1) ++ n.take(1) )
@@ -107,126 +41,69 @@ private object MicroCore {
 
   private def square(x: Double): Double = x * x
 
-  import scala.math._
-
   // square root of the variance (average of squared differences from mean)
-  def deviation[A](x: IndexedSeq[MicroResult[A]]): Double = {
-    val m: Long = mean(x)
-    val v = x.foldLeft( 0D ){ (acc, y) => {
+  def deviation[A](xs: IndexedSeq[MicroResult[A]]): Double = {
+    val m: Long = mean(xs)
+    val v = xs.foldLeft( 0D ){ (acc, y) => {
       acc + square( ( y.stop - y.start ) - m )
-    } } / x.length
+    } } / xs.length
     sqrt(v)
   }
 }
 
-object SingleThreadedRunner {
+object Benchmarker {
 
-  import scala.math._
-
-  def benchmark[T](reps: Int)(x: => T): Bucket[T] = {
+  def benchmark[A](reps: Int)(f: Future[A])(implicit ec: ExecutionContext): Bucket[A] = {
 
     val start: Long = System.nanoTime
-    val result = for( i <- 1 to reps ) yield( MicroCore.execute(x) )
+    val result = for( i <- 1 to reps ) yield( MicroCore.execute(f) )
     val stop: Long  = System.nanoTime
 
-    Bucket(result, start, stop)
+    Bucket(result, stop - start)
   }
 
-  def min[T](x: Bucket[T]): Long = MicroCore.min(x.results)
-  def max[T](x: Bucket[T]): Long = MicroCore.max(x.results)
+  def min[A](bucket: Bucket[A]): Long = MicroCore.min(bucket.results)
 
-  def mean[T](x: Bucket[T]): Long = MicroCore.mean(x.results)
-  def median[T](x: Bucket[T]): Long = MicroCore.median(x.results)
+  def max[A](bucket: Bucket[A]): Long = MicroCore.max(bucket.results)
 
-  def deviation[T](x: Bucket[T]): Double = MicroCore.deviation(x.results)
+  def mean[A](bucket: Bucket[A]): Long = MicroCore.mean(bucket.results)
 
-  def totalTime[T](x: Bucket[T]): Long = x.stop - x.start
-  def avgTime[T](x: Bucket[T]): Long = totalTime(x) / x.results.length
+  def median[A](bucket: Bucket[A]): Long = MicroCore.median(bucket.results)
+
+  def deviation[A](bucket: Bucket[A]): Double = MicroCore.deviation(bucket.results)
+
+  def totalTime[A](bucket: Bucket[A]): Long = bucket.totalTime
+
+  def avgTime[A](bucket: Bucket[A]): Long = bucket.totalTime / bucket.results.length
 
   private def validateAgainstTime(time: Double): Boolean = if ( time > 1.0 ) true else false
 
-  // battle harden in the future => calculation
-  def tps[T](x: Bucket[T]): Long = x.results.length match {
+  // TODO: address calculation
+  def tps[A](bucket: Bucket[A]): Long = bucket.results.length match {
     case 1 => 1
     case _ => {
-      val t = totalTime(x).toDouble / 1000000000.0
+      val t = bucket.totalTime.toDouble / 1000000000.0
       validateAgainstTime(t) match {
         case true => {
-          val res = round( x.results.length.toDouble / t )
-          if ( res <= 0 ) x.results.length else res
+          val res = round( bucket.results.length.toDouble / t )
+          if ( res <= 0 ) bucket.results.length else res
         }
-        case false => x.results.length
+        case false => bucket.results.length
       }
     }
   }
 
-  // battle harden in the future => sort called everytime
-  def statistics[T](objName: String, runType: RunType, x: Bucket[T]): MicroStatistics = MicroStatistics(
+  // TODO: sort called everytime
+  def statistics[A](objName: String, bucket: Bucket[A]): MicroStatistics = MicroStatistics(
     objName,
-    runType,
-    x.results.length,
-    totalTime(x),
-    avgTime(x),
-    tps(x),
-    min(x),
-    max(x),
-    mean(x),
-    median(x),
-    deviation(x)
+    bucket.results.length,
+    totalTime(bucket),
+    avgTime(bucket),
+    tps(bucket),
+    min(bucket),
+    max(bucket),
+    mean(bucket),
+    median(bucket),
+    deviation(bucket)
   )
 }
-
-object MultiThreadedRunner {
-
-  import java.util.concurrent.ExecutorService
-  import scala.concurrent._
-  import duration.Duration
-
-  def benchmark[T](pool: ExecutorService, reps: Int)(x: => T): Bucket[T] = {
-
-    implicit val ec = ExecutionContext.fromExecutorService(pool)
-
-    val start: Long = System.nanoTime
-
-    val listOfFutures = IndexedSeq.fill(reps)( Future( MicroCore.execute(x) ) )
-    val futureList = Future.sequence(listOfFutures)
-    val result = Await.result(futureList, Duration.Inf)
-
-    val stop: Long  = System.nanoTime
-
-    Bucket(result, start, stop)
-  }
-
-  def min[T](x: Bucket[T]): Long = MicroCore.min(x.results)
-  def max[T](x: Bucket[T]): Long = MicroCore.max(x.results)
-
-  def mean[T](x: Bucket[T]): Long = MicroCore.mean(x.results)
-  def median[T](x: Bucket[T]): Long = MicroCore.median(x.results)
-
-  def deviation[T](x: Bucket[T]): Double = MicroCore.deviation(x.results)
-
-  def totalTime[T](x: Bucket[T]): Long = x.stop - x.start
-  def avgTime[T](x: Bucket[T]): Long = totalTime(x) / x.results.length
-
-  // battle harden in the future => calculation
-  def tps[T](x: Bucket[T]): Long = x.results.length match {
-    case 1 => 1
-    case _ => ( x.results.length / avgTime(x) ) * 1000
-  }
-
-  // battle harden in the future => sort called everytime
-  def statistics[T](objName: String, runType: RunType, x: Bucket[T]): MicroStatistics = MicroStatistics(
-    objName,
-    runType,
-    x.results.length,
-    totalTime(x),
-    avgTime(x),
-    tps(x),
-    min(x),
-    max(x),
-    mean(x),
-    median(x),
-    deviation(x)
-  )
-}
-
